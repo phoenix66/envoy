@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+
+jobs:
+  # ---- unit tests with race detector ----
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod  # Reads minimum Go version from go.mod to stay automatically in sync
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Run tests
+        run: go test -race -count=1 -timeout=120s ./...
+
+  # ---- binary build ----
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod  # Reads minimum Go version from go.mod to stay automatically in sync
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Build binary (static)
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+          go build \
+            -ldflags="-s -w -extldflags '-static'" \
+            -trimpath \
+            -o envoy \
+            ./cmd/envoy
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: envoy-linux-amd64
+          path: envoy
+          retention-days: 7
+
+  # ---- linting ----
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod  # Reads minimum Go version from go.mod to stay automatically in sync
+          cache: false   # golangci-lint manages its own cache
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m

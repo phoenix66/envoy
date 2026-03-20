@@ -1,0 +1,23 @@
+services:
+  envoy:
+    build: .
+    image: ghcr.io/phoenix66/envoy:latest
+    restart: unless-stopped
+    ports:
+      # Inbound MTA-to-MTA delivery
+      - "25:25"
+      # Client submission
+      - "587:587"
+    volumes:
+      # Config directory: mount your config.yaml here (read-only)
+      - ./configs:/etc/envoy:ro
+      # Queue database: persisted named volume
+      - envoy-queue:/var/spool/envoy
+    environment:
+      - TZ=UTC
+    # The container runs as UID 1001; ensure mounted host paths are readable
+    # by that user, or use the named volume (recommended).
+
+volumes:
+  envoy-queue:
+    driver: local

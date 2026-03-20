@@ -1,0 +1,89 @@
+server:
+  # The hostname this server identifies itself with in the SMTP banner.
+  # Required.
+  hostname: mail.example.com
+
+  # TCP port to listen on for inbound MTA-to-MTA connections (SMTP, port 25).
+  # Default: 25
+  inbound_port: 25
+
+  # TCP port to listen on for client submission connections (port 587).
+  # Default: 587
+  submission_port: 587
+
+  tls:
+    # Enable STARTTLS on both listener ports.
+    # Default: true
+    enabled: true
+
+    # Path to the PEM-encoded TLS certificate file.
+    # Required when tls.enabled is true.
+    cert: /etc/envoy/tls.crt
+
+    # Path to the PEM-encoded TLS private key file.
+    # Required when tls.enabled is true.
+    key: /etc/envoy/tls.key
+
+# One or more domains that Envoy accepts mail for and relays onward.
+# At least one entry is required.
+domains:
+  - # The domain name (e.g. the part after @ in a recipient address).
+    # Required.
+    name: example.com
+
+    # The next-hop MTA to relay this domain's mail to, in host:port form.
+    # Required.
+    next_hop: mx.example.com:25
+
+  # Additional domains can be listed here:
+  # - name: subsidiary.example.com
+  #   next_hop: mx2.example.com:25
+
+archive:
+  # Hostname or IP address of the journaling archive SMTP server.
+  # Required.
+  smtp_host: archive.example.com
+
+  # TCP port of the archive SMTP server.
+  # Default: 7700
+  smtp_port: 7700
+
+  # RFC 5321 envelope sender address used in journal messages.
+  # Required.
+  journal_from: journal@example.com
+
+  # RFC 5321 envelope recipient address for the journal mailbox.
+  # Required.
+  journal_to: archive@example.com
+
+  tls:
+    # Enable TLS for the connection to the archive server.
+    # Default: true
+    enabled: true
+
+    # Skip TLS certificate verification (useful for self-signed certs).
+    # Default: false — do not disable in production.
+    skip_verify: false
+
+queue:
+  # Directory where the persistent queue database is stored.
+  # Default: /var/spool/envoy
+  path: /var/spool/envoy
+
+  # Maximum number of delivery attempts before a message is considered
+  # permanently failed.
+  # Default: 10
+  max_retries: 10
+
+  # Backoff intervals between successive delivery attempts.
+  # Accepts Go duration strings (e.g. 30s, 5m, 1h).
+  # The last value is reused if there are more retries than entries.
+  # Default: [1m, 5m, 15m, 1h, 4h, 4h, 4h]
+  retry_intervals:
+    - 1m
+    - 5m
+    - 15m
+    - 1h
+    - 4h
+    - 4h
+    - 4h
