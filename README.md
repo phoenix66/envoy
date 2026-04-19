@@ -6,22 +6,27 @@ A self-hosted SMTP journaling relay for independent mail archiving
 
 ## Overview
 
-Envoy sits between your mail infrastructure and a journaling archive (such as
-MailArchiva). It accepts messages via SMTP on both the standard inbound port
-(25) and the client submission port (587), builds an Exchange-style journal
-report envelope for each message, and delivers both the original message and
-the journal envelope to their respective destinations — all through a
-persistent store-and-forward queue that retries on failure.
+Envoy sits between your mail infrastructure and one or more journaling archives
+and forwarding destinations. It accepts messages via SMTP on both the standard
+inbound port (25) and the client submission port (587), builds an Exchange-style
+journal report envelope for each message, and delivers the original message and
+journal envelopes to all configured destinations — all through a persistent
+store-and-forward queue that retries on failure.
+
+Each destination has its own independent queue bucket, worker goroutine, and
+retry state, so a slow or unavailable target never blocks the others.
 
 ```
-Sending MTA ──► Envoy :25/:587 ──► Next-hop MTA  (original message)
-                                └──► Archive SMTP  (journal envelope)
+Sending MTA ──► Envoy :25/:587 ──► forward targets  (original message, verbatim)
+                                └──► archive targets  (journal envelope per target)
 ```
 
 Key properties:
 
 - **No message loss** — messages are written to a bbolt queue before the SMTP
   DATA response is issued; they survive process restarts.
+- **Multiple destinations** — any number of archive and forward targets, each
+  with an independent queue and retry state.
 - **Retry with backoff** — configurable retry intervals; exhausted entries move
   to a dead-letter bucket for operator inspection.
 - **Typed SMTP errors** — 4xx responses trigger retries; 5xx responses
@@ -38,7 +43,7 @@ internal/
   message/    Shared InboundMessage type; NewID() for unique message IDs
   smtp/       Inbound SMTP server — two listeners, go-smtp backend + session
   journal/    Build Exchange-style multipart/report journal envelopes
-  queue/      Persistent bbolt queue — forward + journal buckets, dead-letter
+  queue/      Persistent bbolt queue — per-destination buckets, dead-letter
   delivery/   SMTPSender, Deliverer (enqueue), Worker (poll + send)
 cmd/
   envoy/      Wire-up, signal handling, graceful shutdown
@@ -48,11 +53,11 @@ cmd/
 
 1. A message arrives on `:25` (inbound) or `:587` (submission with AUTH).
 2. The SMTP session validates recipients and reads the full message body.
-3. The message handler builds a journal envelope and enqueues two entries:
-   - `forward` bucket → relay to the domain's configured next-hop MTA.
-   - `journal` bucket → deliver journal envelope to the archive server.
+3. The message handler enqueues one entry per configured destination:
+   - `forward.<name>` bucket → relay the original message to a forward target.
+   - `archive.<name>` bucket → deliver a journal envelope to an archive target.
 4. The SMTP session returns `250 OK` — the sending MTA is released.
-5. Two background workers (one per bucket) poll for due entries and deliver
+5. One background worker per destination polls for due entries and delivers
    them, retrying on temporary failures and dead-lettering on permanent ones.
 
 ## Installation
@@ -109,14 +114,39 @@ domains:
     next_hop: mx.yourdomain.com:25
 
 archive:
-  smtp_host:    archive.yourdomain.com
-  journal_from: journal@yourdomain.com
-  journal_to:   archive@yourdomain.com
+  targets:
+    - name: mailarchiva
+      smtp_host:    archive.yourdomain.com
+      journal_from: journal@yourdomain.com
+      journal_to:   archive@yourdomain.com
 
 auth:
   users:
     - username: submituser
       password_hash: "$2a$10$..."   # bcrypt hash
+```
+
+Multiple archive and forward targets are supported — each entry in the list
+gets its own independent queue bucket and worker:
+
+```yaml
+archive:
+  targets:
+    - name: primary-archive
+      smtp_host: archive1.yourdomain.com
+      journal_from: journal@yourdomain.com
+      journal_to:   archive@yourdomain.com
+    - name: backup-archive
+      smtp_host: archive2.yourdomain.com
+      journal_from: journal@yourdomain.com
+      journal_to:   backup@yourdomain.com
+
+forward:
+  targets:
+    - name: espocrm
+      smtp_host: crm.yourdomain.com
+      smtp_port: 25
+      from: relay@yourdomain.com
 ```
 
 **Generate a bcrypt password hash**
@@ -135,6 +165,18 @@ htpasswd -bnBC 10 "" yourpassword | tr -d ':\n'
 |------|---------|-------------|
 | `--config` | `/etc/envoy/config.yaml` | Path to config file |
 | `--dev` | `false` | Console logger instead of JSON |
+
+## Upgrading from v0.1
+
+v0.2.0 contains breaking config and queue changes:
+
+- `archive:` is now `archive.targets:` — a list of named target blocks.
+- `forward:` is a new top-level section with a `targets:` list.
+- Queue bucket names changed to `archive.<name>` / `forward.<name>`.
+  Existing queue databases from v0.1 are not compatible; drain the queue
+  before upgrading.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full list of changes.
 
 ## Contributing
 

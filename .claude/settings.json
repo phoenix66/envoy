@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(snap list:*)",
+      "Read(//home/jbarrett/go/**)",
+      "Read(//home/jbarrett/.local/**)",
+      "Read(//home/jbarrett/**)",
+      "Bash(go get:*)",
+      "Bash(go build:*)",
+      "Bash(go test:*)",
+      "Bash(ls /home/jbarrett/go/pkg/mod/go.etcd.io/bbolt@v1.4.3/*.go)",
+      "Bash(ls /home/jbarrett/go/pkg/mod/github.com/emersion/go-smtp@v0.24.0/*.go)",
+      "Bash(grep -rn \"SMTPError\\\\|EnhancedCode\" /home/jbarrett/go/pkg/mod/github.com/emersion/go-smtp@v0.24.0/*.go)",
+      "Bash(ls /home/jbarrett/go/pkg/mod/github.com/emersion/go-sasl@v0.0.0-20241020182733-b788ff22d5a6/*.go)",
+      "Bash(go list:*)",
+      "Bash(go vet:*)",
+      "Bash(make test:*)",
+      "Bash(make build:*)",
+      "Bash(make vet:*)",
+      "Bash(grep -v \"^$\")",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(GIT_ASKPASS= git push)"
+    ]
+  }
+}
