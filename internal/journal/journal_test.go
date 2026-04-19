@@ -23,7 +23,8 @@ const rawOriginal = "From: sender@example.com\r\n" +
 	"\r\n" +
 	"Hello, this is the message body.\r\n"
 
-var testArchiveCfg = config.ArchiveConfig{
+var testArchiveCfg = config.ArchiveTargetConfig{
+	Name:        "primary",
 	SMTPHost:    "archive.example.com",
 	SMTPPort:    7700,
 	JournalFrom: "journal@example.com",

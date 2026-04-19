@@ -34,13 +34,35 @@ type DomainConfig struct {
 	NextHop string `mapstructure:"next_hop"`
 }
 
-// ArchiveConfig holds settings for the journaling archive destination.
-type ArchiveConfig struct {
+// ArchiveTargetConfig holds settings for one journaling archive destination.
+type ArchiveTargetConfig struct {
+	// Name uniquely identifies this target and is used as the queue bucket prefix.
+	Name        string    `mapstructure:"name"`
 	SMTPHost    string    `mapstructure:"smtp_host"`
 	SMTPPort    int       `mapstructure:"smtp_port"`
 	JournalFrom string    `mapstructure:"journal_from"`
 	JournalTo   string    `mapstructure:"journal_to"`
 	TLS         TLSConfig `mapstructure:"tls"`
+}
+
+// ArchiveConfig holds the list of journaling archive destinations.
+type ArchiveConfig struct {
+	Targets []ArchiveTargetConfig `mapstructure:"targets"`
+}
+
+// ForwardTargetConfig holds settings for one plain SMTP forward destination.
+type ForwardTargetConfig struct {
+	// Name uniquely identifies this target and is used as the queue bucket prefix.
+	Name     string    `mapstructure:"name"`
+	SMTPHost string    `mapstructure:"smtp_host"`
+	SMTPPort int       `mapstructure:"smtp_port"`
+	From     string    `mapstructure:"from"`
+	TLS      TLSConfig `mapstructure:"tls"`
+}
+
+// ForwardConfig holds the list of plain SMTP forward destinations.
+type ForwardConfig struct {
+	Targets []ForwardTargetConfig `mapstructure:"targets"`
 }
 
 // QueueConfig holds settings for the persistent store-and-forward queue.
@@ -66,6 +88,7 @@ type Config struct {
 	Server  ServerConfig   `mapstructure:"server"`
 	Domains []DomainConfig `mapstructure:"domains"`
 	Archive ArchiveConfig  `mapstructure:"archive"`
+	Forward ForwardConfig  `mapstructure:"forward"`
 	Queue   QueueConfig    `mapstructure:"queue"`
 	Auth    AuthConfig     `mapstructure:"auth"`
 }
@@ -94,6 +117,8 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 
+	applyTargetDefaults(&cfg)
+
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
@@ -106,15 +131,27 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.submission_port", 587)
 	v.SetDefault("server.tls.enabled", true)
 
-	v.SetDefault("archive.smtp_port", 7700)
-	v.SetDefault("archive.tls.enabled", true)
-	v.SetDefault("archive.tls.skip_verify", false)
-
 	v.SetDefault("queue.path", "/var/spool/envoy")
 	v.SetDefault("queue.max_retries", 10)
 	v.SetDefault("queue.retry_intervals", []string{
 		"1m", "5m", "15m", "1h", "4h", "4h", "4h",
 	})
+}
+
+// applyTargetDefaults fills in default port values for archive and forward
+// targets that were not explicitly set. Viper cannot set defaults for slice
+// elements, so defaults are applied here after unmarshaling.
+func applyTargetDefaults(cfg *Config) {
+	for i := range cfg.Archive.Targets {
+		if cfg.Archive.Targets[i].SMTPPort == 0 {
+			cfg.Archive.Targets[i].SMTPPort = 7700
+		}
+	}
+	for i := range cfg.Forward.Targets {
+		if cfg.Forward.Targets[i].SMTPPort == 0 {
+			cfg.Forward.Targets[i].SMTPPort = 25
+		}
+	}
 }
 
 // decodeDurationHook returns a mapstructure decode hook that converts strings
@@ -185,18 +222,62 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// archive
-	if c.Archive.SMTPHost == "" {
-		errs = append(errs, errors.New("archive.smtp_host is required"))
+	// archive targets
+	for i, t := range c.Archive.Targets {
+		if t.Name == "" {
+			errs = append(errs, fmt.Errorf("archive.targets[%d].name is required", i))
+		}
+		if t.SMTPHost == "" {
+			errs = append(errs, fmt.Errorf("archive.targets[%d].smtp_host is required", i))
+		}
+		if t.SMTPPort < 1 || t.SMTPPort > 65535 {
+			errs = append(errs, fmt.Errorf("archive.targets[%d].smtp_port %d is out of range (1–65535)", i, t.SMTPPort))
+		}
+		if t.JournalFrom == "" {
+			errs = append(errs, fmt.Errorf("archive.targets[%d].journal_from is required", i))
+		}
+		if t.JournalTo == "" {
+			errs = append(errs, fmt.Errorf("archive.targets[%d].journal_to is required", i))
+		}
 	}
-	if c.Archive.SMTPPort < 1 || c.Archive.SMTPPort > 65535 {
-		errs = append(errs, fmt.Errorf("archive.smtp_port %d is out of range (1–65535)", c.Archive.SMTPPort))
+
+	// forward targets
+	for i, t := range c.Forward.Targets {
+		if t.Name == "" {
+			errs = append(errs, fmt.Errorf("forward.targets[%d].name is required", i))
+		}
+		if t.SMTPHost == "" {
+			errs = append(errs, fmt.Errorf("forward.targets[%d].smtp_host is required", i))
+		}
+		if t.SMTPPort < 1 || t.SMTPPort > 65535 {
+			errs = append(errs, fmt.Errorf("forward.targets[%d].smtp_port %d is out of range (1–65535)", i, t.SMTPPort))
+		}
+		if t.From == "" {
+			errs = append(errs, fmt.Errorf("forward.targets[%d].from is required", i))
+		}
 	}
-	if c.Archive.JournalFrom == "" {
-		errs = append(errs, errors.New("archive.journal_from is required"))
+
+	// target name uniqueness across both lists
+	seen := make(map[string]string) // name → "archive" or "forward"
+	for i, t := range c.Archive.Targets {
+		if t.Name == "" {
+			continue // already reported above
+		}
+		if prev, ok := seen[t.Name]; ok {
+			errs = append(errs, fmt.Errorf("archive.targets[%d].name %q duplicates a %s target name", i, t.Name, prev))
+		} else {
+			seen[t.Name] = "archive"
+		}
 	}
-	if c.Archive.JournalTo == "" {
-		errs = append(errs, errors.New("archive.journal_to is required"))
+	for i, t := range c.Forward.Targets {
+		if t.Name == "" {
+			continue
+		}
+		if prev, ok := seen[t.Name]; ok {
+			errs = append(errs, fmt.Errorf("forward.targets[%d].name %q duplicates a %s target name", i, t.Name, prev))
+		} else {
+			seen[t.Name] = "forward"
+		}
 	}
 
 	// queue

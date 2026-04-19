@@ -9,19 +9,9 @@ import (
 	bbolt "go.etcd.io/bbolt"
 )
 
-// Named buckets for active work queues.
-const (
-	BucketForward = "forward"
-	BucketJournal = "journal"
-)
-
-// Internal terminal buckets — not exposed for enqueue.
-const (
-	bucketDead      = "dead"
-	bucketDelivered = "delivered"
-)
-
-var allBuckets = []string{BucketForward, BucketJournal, bucketDead, bucketDelivered}
+// bucketDelivered is the internal archive bucket for successfully delivered
+// entries. It is created by Open and is not a per-destination bucket.
+const bucketDelivered = "delivered"
 
 // QueueEntry is a single item in the persistent queue.
 type QueueEntry struct {
@@ -30,7 +20,7 @@ type QueueEntry struct {
 	ID string `json:"id"`
 
 	// Raw holds the bytes to deliver: the original message for forward
-	// entries, or the journal envelope for journal entries.
+	// entries, or the journal envelope for archive entries.
 	Raw []byte `json:"raw"`
 
 	// Dest is the target host:port for delivery.
@@ -61,6 +51,7 @@ type Queue struct {
 
 // Open opens (or creates) the queue database at path. maxRetries controls
 // how many failed attempts are allowed before an entry is dead-lettered.
+// Call InitBuckets after Open to create per-destination work buckets.
 func Open(path string, maxRetries int) (*Queue, error) {
 	db, err := bbolt.Open(path, 0o600, nil)
 	if err != nil {
@@ -68,11 +59,37 @@ func Open(path string, maxRetries int) (*Queue, error) {
 	}
 
 	q := &Queue{db: db, maxRetries: maxRetries}
-	if err := q.createBuckets(); err != nil {
+
+	// Always create the shared delivered archive bucket.
+	if err := q.db.Update(func(tx *bbolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists([]byte(bucketDelivered))
+		return err
+	}); err != nil {
 		_ = db.Close()
-		return nil, err
+		return nil, fmt.Errorf("queue: creating delivered bucket: %w", err)
 	}
+
 	return q, nil
+}
+
+// InitBuckets creates live and dead-letter buckets for the given destination
+// bucket names. names should be in the form "archive.<target>" or
+// "forward.<target>" (e.g. "archive.mailarchiva", "forward.espocrm").
+// For each name, a corresponding dead-letter bucket "dead.<name>" is also
+// created. This method is idempotent and safe to call on an existing database.
+func (q *Queue) InitBuckets(names []string) error {
+	return q.db.Update(func(tx *bbolt.Tx) error {
+		for _, name := range names {
+			if _, err := tx.CreateBucketIfNotExists([]byte(name)); err != nil {
+				return fmt.Errorf("queue: creating bucket %q: %w", name, err)
+			}
+			dead := "dead." + name
+			if _, err := tx.CreateBucketIfNotExists([]byte(dead)); err != nil {
+				return fmt.Errorf("queue: creating bucket %q: %w", dead, err)
+			}
+		}
+		return nil
+	})
 }
 
 // Close closes the underlying database.
@@ -80,29 +97,19 @@ func (q *Queue) Close() error {
 	return q.db.Close()
 }
 
-// createBuckets ensures all required buckets exist.
-func (q *Queue) createBuckets() error {
-	return q.db.Update(func(tx *bbolt.Tx) error {
-		for _, name := range allBuckets {
-			if _, err := tx.CreateBucketIfNotExists([]byte(name)); err != nil {
-				return fmt.Errorf("queue: creating bucket %q: %w", name, err)
-			}
-		}
-		return nil
-	})
-}
-
-// Enqueue adds entry to bucket. bucket must be BucketForward or BucketJournal.
+// Enqueue adds entry to the named bucket. The bucket must have been created
+// by InitBuckets before calling Enqueue.
 func (q *Queue) Enqueue(bucket string, entry QueueEntry) error {
-	if bucket != BucketForward && bucket != BucketJournal {
-		return fmt.Errorf("queue: %q is not a valid work bucket", bucket)
-	}
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return fmt.Errorf("queue: marshaling entry: %w", err)
 	}
 	return q.db.Update(func(tx *bbolt.Tx) error {
-		return tx.Bucket([]byte(bucket)).Put([]byte(entry.ID), data)
+		b := tx.Bucket([]byte(bucket))
+		if b == nil {
+			return fmt.Errorf("queue: bucket %q not found", bucket)
+		}
+		return b.Put([]byte(entry.ID), data)
 	})
 }
 
@@ -155,8 +162,10 @@ func (q *Queue) MarkDelivered(bucket, id string) error {
 // MarkFailed increments the attempt count for id in bucket and schedules the
 // next retry. retryIntervals defines the wait time after each attempt; the
 // last value is reused once all intervals are exhausted. If the attempt count
-// reaches maxRetries the entry is moved to the dead-letter bucket.
+// reaches maxRetries the entry is moved to the dead-letter bucket
+// ("dead." + bucket).
 func (q *Queue) MarkFailed(bucket, id string, retryIntervals []time.Duration) error {
+	deadBucket := "dead." + bucket
 	return q.db.Update(func(tx *bbolt.Tx) error {
 		src := tx.Bucket([]byte(bucket))
 		if src == nil {
@@ -182,7 +191,11 @@ func (q *Queue) MarkFailed(bucket, id string, retryIntervals []time.Duration) er
 			if err != nil {
 				return fmt.Errorf("queue: marshaling dead entry: %w", err)
 			}
-			return tx.Bucket([]byte(bucketDead)).Put([]byte(id), dead)
+			dst := tx.Bucket([]byte(deadBucket))
+			if dst == nil {
+				return fmt.Errorf("queue: dead bucket %q not found", deadBucket)
+			}
+			return dst.Put([]byte(id), dead)
 		}
 
 		if len(retryIntervals) > 0 {
@@ -201,9 +214,11 @@ func (q *Queue) MarkFailed(bucket, id string, retryIntervals []time.Duration) er
 	})
 }
 
-// MarkDead moves entry id from bucket directly to the dead-letter bucket,
-// regardless of attempt count. Use this for permanent (5xx) delivery failures.
+// MarkDead moves entry id from bucket directly to the dead-letter bucket
+// ("dead." + bucket), regardless of attempt count. Use this for permanent
+// (5xx) delivery failures.
 func (q *Queue) MarkDead(bucket, id string) error {
+	deadBucket := "dead." + bucket
 	return q.db.Update(func(tx *bbolt.Tx) error {
 		src := tx.Bucket([]byte(bucket))
 		if src == nil {
@@ -216,7 +231,11 @@ func (q *Queue) MarkDead(bucket, id string) error {
 		if err := src.Delete([]byte(id)); err != nil {
 			return err
 		}
-		return tx.Bucket([]byte(bucketDead)).Put([]byte(id), data)
+		dst := tx.Bucket([]byte(deadBucket))
+		if dst == nil {
+			return fmt.Errorf("queue: dead bucket %q not found", deadBucket)
+		}
+		return dst.Put([]byte(id), data)
 	})
 }
 

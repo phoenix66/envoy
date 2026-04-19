@@ -23,11 +23,27 @@ func validConfig() *Config {
 			{Name: "example.com", NextHop: "mx.example.com:25"},
 		},
 		Archive: ArchiveConfig{
-			SMTPHost:    "archive.example.com",
-			SMTPPort:    7700,
-			JournalFrom: "journal@example.com",
-			JournalTo:   "archive@example.com",
-			TLS:         TLSConfig{Enabled: true},
+			Targets: []ArchiveTargetConfig{
+				{
+					Name:        "primary",
+					SMTPHost:    "archive.example.com",
+					SMTPPort:    7700,
+					JournalFrom: "journal@example.com",
+					JournalTo:   "archive@example.com",
+					TLS:         TLSConfig{Enabled: true},
+				},
+			},
+		},
+		Forward: ForwardConfig{
+			Targets: []ForwardTargetConfig{
+				{
+					Name:     "crm",
+					SMTPHost: "crm.example.com",
+					SMTPPort: 25,
+					From:     "relay@example.com",
+					TLS:      TLSConfig{Enabled: true},
+				},
+			},
 		},
 		Queue: QueueConfig{
 			Path:           "/var/spool/envoy",
@@ -40,6 +56,22 @@ func validConfig() *Config {
 func TestValidate_Valid(t *testing.T) {
 	if err := validConfig().Validate(); err != nil {
 		t.Fatalf("expected no error, got: %v", err)
+	}
+}
+
+func TestValidate_NoArchiveTargets_Valid(t *testing.T) {
+	cfg := validConfig()
+	cfg.Archive.Targets = nil
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected no error with no archive targets, got: %v", err)
+	}
+}
+
+func TestValidate_NoForwardTargets_Valid(t *testing.T) {
+	cfg := validConfig()
+	cfg.Forward.Targets = nil
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected no error with no forward targets, got: %v", err)
 	}
 }
 
@@ -132,36 +164,180 @@ func TestValidate_DomainInvalidNextHop(t *testing.T) {
 	assertError(t, cfg, "not a valid host:port")
 }
 
-// --- archive ---
+// --- archive targets ---
 
-func TestValidate_MissingArchiveSMTPHost(t *testing.T) {
+func TestValidate_ArchiveTargetMissingName(t *testing.T) {
 	cfg := validConfig()
-	cfg.Archive.SMTPHost = ""
-	assertError(t, cfg, "archive.smtp_host is required")
+	cfg.Archive.Targets[0].Name = ""
+	assertError(t, cfg, "archive.targets[0].name is required")
 }
 
-func TestValidate_ArchiveSMTPPortZero(t *testing.T) {
+func TestValidate_ArchiveTargetMissingSMTPHost(t *testing.T) {
 	cfg := validConfig()
-	cfg.Archive.SMTPPort = 0
-	assertError(t, cfg, "archive.smtp_port")
+	cfg.Archive.Targets[0].SMTPHost = ""
+	assertError(t, cfg, "archive.targets[0].smtp_host is required")
 }
 
-func TestValidate_ArchiveSMTPPortTooHigh(t *testing.T) {
+func TestValidate_ArchiveTargetSMTPPortZero(t *testing.T) {
 	cfg := validConfig()
-	cfg.Archive.SMTPPort = 99999
-	assertError(t, cfg, "archive.smtp_port")
+	cfg.Archive.Targets[0].SMTPPort = 0
+	assertError(t, cfg, "archive.targets[0].smtp_port")
 }
 
-func TestValidate_MissingJournalFrom(t *testing.T) {
+func TestValidate_ArchiveTargetSMTPPortTooHigh(t *testing.T) {
 	cfg := validConfig()
-	cfg.Archive.JournalFrom = ""
-	assertError(t, cfg, "archive.journal_from is required")
+	cfg.Archive.Targets[0].SMTPPort = 99999
+	assertError(t, cfg, "archive.targets[0].smtp_port")
 }
 
-func TestValidate_MissingJournalTo(t *testing.T) {
+func TestValidate_ArchiveTargetMissingJournalFrom(t *testing.T) {
 	cfg := validConfig()
-	cfg.Archive.JournalTo = ""
-	assertError(t, cfg, "archive.journal_to is required")
+	cfg.Archive.Targets[0].JournalFrom = ""
+	assertError(t, cfg, "archive.targets[0].journal_from is required")
+}
+
+func TestValidate_ArchiveTargetMissingJournalTo(t *testing.T) {
+	cfg := validConfig()
+	cfg.Archive.Targets[0].JournalTo = ""
+	assertError(t, cfg, "archive.targets[0].journal_to is required")
+}
+
+func TestValidate_MultipleArchiveTargets_Valid(t *testing.T) {
+	cfg := validConfig()
+	cfg.Archive.Targets = append(cfg.Archive.Targets, ArchiveTargetConfig{
+		Name:        "secondary",
+		SMTPHost:    "archive2.example.com",
+		SMTPPort:    7700,
+		JournalFrom: "journal@example.com",
+		JournalTo:   "archive2@example.com",
+		TLS:         TLSConfig{Enabled: true},
+	})
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected no error with two archive targets, got: %v", err)
+	}
+}
+
+// --- forward targets ---
+
+func TestValidate_ForwardTargetMissingName(t *testing.T) {
+	cfg := validConfig()
+	cfg.Forward.Targets[0].Name = ""
+	assertError(t, cfg, "forward.targets[0].name is required")
+}
+
+func TestValidate_ForwardTargetMissingSMTPHost(t *testing.T) {
+	cfg := validConfig()
+	cfg.Forward.Targets[0].SMTPHost = ""
+	assertError(t, cfg, "forward.targets[0].smtp_host is required")
+}
+
+func TestValidate_ForwardTargetSMTPPortZero(t *testing.T) {
+	cfg := validConfig()
+	cfg.Forward.Targets[0].SMTPPort = 0
+	assertError(t, cfg, "forward.targets[0].smtp_port")
+}
+
+func TestValidate_ForwardTargetSMTPPortTooHigh(t *testing.T) {
+	cfg := validConfig()
+	cfg.Forward.Targets[0].SMTPPort = 99999
+	assertError(t, cfg, "forward.targets[0].smtp_port")
+}
+
+func TestValidate_ForwardTargetMissingFrom(t *testing.T) {
+	cfg := validConfig()
+	cfg.Forward.Targets[0].From = ""
+	assertError(t, cfg, "forward.targets[0].from is required")
+}
+
+func TestValidate_MultipleForwardTargets_Valid(t *testing.T) {
+	cfg := validConfig()
+	cfg.Forward.Targets = append(cfg.Forward.Targets, ForwardTargetConfig{
+		Name:     "erp",
+		SMTPHost: "erp.example.com",
+		SMTPPort: 25,
+		From:     "relay@example.com",
+		TLS:      TLSConfig{Enabled: true},
+	})
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected no error with two forward targets, got: %v", err)
+	}
+}
+
+// --- target name uniqueness ---
+
+func TestValidate_DuplicateArchiveTargetNames(t *testing.T) {
+	cfg := validConfig()
+	cfg.Archive.Targets = []ArchiveTargetConfig{
+		{Name: "primary", SMTPHost: "a.example.com", SMTPPort: 7700,
+			JournalFrom: "j@e.com", JournalTo: "a@e.com"},
+		{Name: "primary", SMTPHost: "b.example.com", SMTPPort: 7700,
+			JournalFrom: "j@e.com", JournalTo: "b@e.com"},
+	}
+	assertError(t, cfg, `"primary" duplicates`)
+}
+
+func TestValidate_DuplicateForwardTargetNames(t *testing.T) {
+	cfg := validConfig()
+	cfg.Forward.Targets = []ForwardTargetConfig{
+		{Name: "crm", SMTPHost: "crm1.example.com", SMTPPort: 25, From: "relay@example.com"},
+		{Name: "crm", SMTPHost: "crm2.example.com", SMTPPort: 25, From: "relay@example.com"},
+	}
+	assertError(t, cfg, `"crm" duplicates`)
+}
+
+func TestValidate_DuplicateNameAcrossLists(t *testing.T) {
+	cfg := validConfig()
+	// archive target and forward target share the same name
+	cfg.Archive.Targets[0].Name = "shared"
+	cfg.Forward.Targets[0].Name = "shared"
+	assertError(t, cfg, `"shared" duplicates`)
+}
+
+func TestValidate_UniqueNamesAcrossLists_Valid(t *testing.T) {
+	cfg := validConfig()
+	cfg.Archive.Targets[0].Name = "archive-one"
+	cfg.Forward.Targets[0].Name = "forward-one"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected no error with unique names across lists, got: %v", err)
+	}
+}
+
+// --- applyTargetDefaults ---
+
+func TestApplyTargetDefaults_ArchiveSMTPPort(t *testing.T) {
+	cfg := &Config{
+		Archive: ArchiveConfig{
+			Targets: []ArchiveTargetConfig{{SMTPPort: 0}},
+		},
+	}
+	applyTargetDefaults(cfg)
+	if got := cfg.Archive.Targets[0].SMTPPort; got != 7700 {
+		t.Errorf("archive SMTPPort default = %d, want 7700", got)
+	}
+}
+
+func TestApplyTargetDefaults_ForwardSMTPPort(t *testing.T) {
+	cfg := &Config{
+		Forward: ForwardConfig{
+			Targets: []ForwardTargetConfig{{SMTPPort: 0}},
+		},
+	}
+	applyTargetDefaults(cfg)
+	if got := cfg.Forward.Targets[0].SMTPPort; got != 25 {
+		t.Errorf("forward SMTPPort default = %d, want 25", got)
+	}
+}
+
+func TestApplyTargetDefaults_DoesNotOverrideExplicitPort(t *testing.T) {
+	cfg := &Config{
+		Archive: ArchiveConfig{
+			Targets: []ArchiveTargetConfig{{SMTPPort: 9999}},
+		},
+	}
+	applyTargetDefaults(cfg)
+	if got := cfg.Archive.Targets[0].SMTPPort; got != 9999 {
+		t.Errorf("archive SMTPPort = %d, want 9999 (explicit value should not be overridden)", got)
+	}
 }
 
 // --- queue ---
@@ -195,9 +371,6 @@ func TestValidate_MultipleErrors(t *testing.T) {
 	for _, substr := range []string{
 		"server.hostname",
 		"at least one domain",
-		"archive.smtp_host",
-		"archive.journal_from",
-		"archive.journal_to",
 	} {
 		if !strings.Contains(err.Error(), substr) {
 			t.Errorf("expected error to contain %q\nfull error: %v", substr, err)

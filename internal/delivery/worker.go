@@ -13,6 +13,15 @@ import (
 
 const defaultPollInterval = 5 * time.Second
 
+// BucketTarget associates a destination bucket with the TLS config needed
+// for delivery to that destination.
+type BucketTarget struct {
+	// Bucket is the queue bucket name, e.g. "archive.mailarchiva" or "forward.espocrm".
+	Bucket string
+	// TLS is the TLS configuration for outbound delivery. nil means plain SMTP.
+	TLS *tls.Config
+}
+
 // WorkerConfig holds tunable parameters for the delivery Worker.
 type WorkerConfig struct {
 	// RetryIntervals controls the wait between successive failed attempts.
@@ -24,16 +33,13 @@ type WorkerConfig struct {
 	// Defaults to 5 s if zero.
 	PollInterval time.Duration
 
-	// ForwardTLSCfg is the TLS config used for forward (next-hop) delivery.
-	// nil means plain SMTP / opportunistic STARTTLS not attempted.
-	ForwardTLSCfg *tls.Config
-
-	// JournalTLSCfg is the TLS config used for archive delivery.
-	JournalTLSCfg *tls.Config
+	// Targets is the list of destination buckets to process. One goroutine
+	// is spawned per entry.
+	Targets []BucketTarget
 }
 
 // Worker processes due queue entries and delivers them via Sender.
-// Two independent goroutines run, one per bucket (forward and journal).
+// One independent goroutine runs per configured BucketTarget.
 type Worker struct {
 	q      *queue.Queue
 	sender Sender
@@ -50,15 +56,19 @@ func NewWorker(q *queue.Queue, sender Sender, cfg WorkerConfig, log *zap.Logger)
 	return &Worker{q: q, sender: sender, cfg: cfg, log: log}
 }
 
-// Start spawns one processing goroutine per bucket. It returns immediately;
-// the goroutines run until ctx is cancelled.
+// Start spawns one processing goroutine per BucketTarget. It returns
+// immediately; the goroutines run until ctx is cancelled.
 func (w *Worker) Start(ctx context.Context) {
-	w.wg.Add(2)
-	go func() { defer w.wg.Done(); w.runBucket(ctx, queue.BucketForward, w.cfg.ForwardTLSCfg) }()
-	go func() { defer w.wg.Done(); w.runBucket(ctx, queue.BucketJournal, w.cfg.JournalTLSCfg) }()
+	w.wg.Add(len(w.cfg.Targets))
+	for _, t := range w.cfg.Targets {
+		go func(bucket string, tlsCfg *tls.Config) {
+			defer w.wg.Done()
+			w.runBucket(ctx, bucket, tlsCfg)
+		}(t.Bucket, t.TLS)
+	}
 }
 
-// Wait blocks until both delivery goroutines have exited. Call after
+// Wait blocks until all delivery goroutines have exited. Call after
 // cancelling the context passed to Start.
 func (w *Worker) Wait() {
 	w.wg.Wait()

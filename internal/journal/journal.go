@@ -15,11 +15,11 @@ import (
 
 // Builder constructs journal report envelopes from received messages.
 type Builder struct {
-	cfg config.ArchiveConfig
+	cfg config.ArchiveTargetConfig
 }
 
-// New returns a Builder configured with the provided archive settings.
-func New(cfg config.ArchiveConfig) *Builder {
+// New returns a Builder configured with the provided archive target settings.
+func New(cfg config.ArchiveTargetConfig) *Builder {
 	return &Builder{cfg: cfg}
 }
 

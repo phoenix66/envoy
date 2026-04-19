@@ -15,7 +15,6 @@ import (
 
 	"github.com/phoenix66/envoy/internal/config"
 	"github.com/phoenix66/envoy/internal/delivery"
-	"github.com/phoenix66/envoy/internal/journal"
 	"github.com/phoenix66/envoy/internal/message"
 	"github.com/phoenix66/envoy/internal/queue"
 	smtpsrv "github.com/phoenix66/envoy/internal/smtp"
@@ -61,16 +60,35 @@ func run() error {
 	}
 	log.Info("queue opened", zap.String("path", dbPath))
 
-	// ---- journal builder ----
-	jb := journal.New(cfg.Archive)
+	// ---- initialise per-destination buckets ----
+	bucketNames := collectBucketNames(cfg)
+	if err := q.InitBuckets(bucketNames); err != nil {
+		return fmt.Errorf("initialising queue buckets: %w", err)
+	}
+	log.Info("queue buckets initialised", zap.Int("count", len(bucketNames)))
 
 	// ---- deliverer ----
 	dlv := delivery.New(*cfg, q)
 
+	// ---- delivery worker targets ----
+	var workerTargets []delivery.BucketTarget
+	for _, t := range cfg.Archive.Targets {
+		workerTargets = append(workerTargets, delivery.BucketTarget{
+			Bucket: "archive." + t.Name,
+			TLS:    buildTLSConfig(t.TLS, t.SMTPHost),
+		})
+	}
+	for _, t := range cfg.Forward.Targets {
+		workerTargets = append(workerTargets, delivery.BucketTarget{
+			Bucket: "forward." + t.Name,
+			TLS:    buildTLSConfig(t.TLS, t.SMTPHost),
+		})
+	}
+
 	// ---- delivery worker ----
 	worker := delivery.NewWorker(q, &delivery.SMTPSender{}, delivery.WorkerConfig{
 		RetryIntervals: cfg.Queue.RetryIntervals,
-		JournalTLSCfg:  buildTLSConfig(cfg.Archive.TLS, cfg.Archive.SMTPHost),
+		Targets:        workerTargets,
 	}, log.Named("worker"))
 
 	// ---- message handler ----
@@ -83,40 +101,30 @@ func run() error {
 			zap.String("domain", msg.Domain),
 		)
 
-		// Build journal envelope. Failure here rejects the message at SMTP level.
-		envelope, err := jb.Build(msg)
-		if err != nil {
-			log.Error("building journal envelope",
-				zap.String("id", msg.ID),
-				zap.Error(err),
-			)
-			return fmt.Errorf("journal build: %w", err)
-		}
-
-		// Enqueue for forward relay.
-		if err := dlv.DeliverForward(msg); err != nil {
-			log.Error("enqueuing forward delivery",
-				zap.String("id", msg.ID),
-				zap.Error(err),
-			)
-			// Accept the message even if forward enqueue fails — the operator
-			// can inspect the dead-letter queue. Returning an error here would
-			// cause the sending MTA to retry indefinitely.
-		} else {
-			log.Info("forward delivery enqueued",
-				zap.String("id", msg.ID),
-				zap.String("domain", msg.Domain),
-			)
-		}
-
-		// Enqueue journal envelope for archive delivery.
-		if err := dlv.DeliverJournal(msg, envelope); err != nil {
+		// Enqueue journal envelope for each configured archive target.
+		if err := dlv.DeliverJournal(msg); err != nil {
 			log.Error("enqueuing journal delivery",
 				zap.String("id", msg.ID),
 				zap.Error(err),
 			)
 		} else {
-			log.Info("journal delivery enqueued", zap.String("id", msg.ID))
+			log.Info("journal delivery enqueued",
+				zap.String("id", msg.ID),
+				zap.Int("archive_targets", len(cfg.Archive.Targets)),
+			)
+		}
+
+		// Enqueue verbatim message for each configured forward target.
+		if err := dlv.DeliverForward(msg); err != nil {
+			log.Error("enqueuing forward delivery",
+				zap.String("id", msg.ID),
+				zap.Error(err),
+			)
+		} else if len(cfg.Forward.Targets) > 0 {
+			log.Info("forward delivery enqueued",
+				zap.String("id", msg.ID),
+				zap.Int("forward_targets", len(cfg.Forward.Targets)),
+			)
 		}
 
 		return nil
@@ -131,7 +139,7 @@ func run() error {
 	// ---- start workers ----
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	worker.Start(workerCtx)
-	log.Info("delivery workers started")
+	log.Info("delivery workers started", zap.Int("goroutines", len(workerTargets)))
 
 	// ---- start SMTP server ----
 	serverErrc := make(chan error, 1)
@@ -168,7 +176,7 @@ func run() error {
 	}
 	log.Info("SMTP server closed")
 
-	// 2. Cancel delivery workers and wait for in-flight deliveries to complete.
+	// 2. Cancel delivery workers and wait for all goroutines to finish.
 	workerCancel()
 
 	workerDone := make(chan struct{})
@@ -194,6 +202,19 @@ func run() error {
 	return nil
 }
 
+// collectBucketNames builds the list of per-destination bucket names from all
+// configured archive and forward targets.
+func collectBucketNames(cfg *config.Config) []string {
+	names := make([]string, 0, len(cfg.Archive.Targets)+len(cfg.Forward.Targets))
+	for _, t := range cfg.Archive.Targets {
+		names = append(names, "archive."+t.Name)
+	}
+	for _, t := range cfg.Forward.Targets {
+		names = append(names, "forward."+t.Name)
+	}
+	return names
+}
+
 // buildLogger returns a zap logger. Development mode uses a human-readable
 // console encoder; production uses structured JSON.
 func buildLogger(dev bool) (*zap.Logger, error) {
@@ -203,7 +224,7 @@ func buildLogger(dev bool) (*zap.Logger, error) {
 	return zap.NewProduction()
 }
 
-// buildTLSConfig constructs a *tls.Config from the archive TLS settings.
+// buildTLSConfig constructs a *tls.Config from TLS settings.
 // Returns nil if TLS is disabled, which causes the sender to use plain SMTP.
 func buildTLSConfig(cfg config.TLSConfig, serverName string) *tls.Config {
 	if !cfg.Enabled {
@@ -214,4 +235,3 @@ func buildTLSConfig(cfg config.TLSConfig, serverName string) *tls.Config {
 		InsecureSkipVerify: cfg.SkipVerify, //nolint:gosec // operator-controlled opt-in
 	}
 }
-

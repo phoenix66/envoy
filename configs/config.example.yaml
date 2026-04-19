@@ -1,3 +1,6 @@
+# Breaking change from phase 1: archive: is now archive.targets (list)
+# and forward: is a new section. See CHANGELOG.md for details.
+
 server:
   # The hostname this server identifies itself with in the SMTP banner.
   # Required.
@@ -39,31 +42,90 @@ domains:
   # - name: subsidiary.example.com
   #   next_hop: mx2.example.com:25
 
+# archive: defines one or more journaling archive destinations.
+# Each target receives an independent journal envelope and has its own
+# queue bucket and retry state. Zero targets is valid.
 archive:
-  # Hostname or IP address of the journaling archive SMTP server.
-  # Required.
-  smtp_host: archive.example.com
+  targets:
+    - # Unique name for this target. Used as the queue bucket identifier.
+      # Required. Must be unique across all archive and forward targets.
+      name: mailarchiva
 
-  # TCP port of the archive SMTP server.
-  # Default: 7700
-  smtp_port: 7700
+      # Hostname or IP address of the archive SMTP server.
+      # Required.
+      smtp_host: archive.example.com
 
-  # RFC 5321 envelope sender address used in journal messages.
-  # Required.
-  journal_from: journal@example.com
+      # TCP port of the archive SMTP server.
+      # Default: 7700
+      smtp_port: 7700
 
-  # RFC 5321 envelope recipient address for the journal mailbox.
-  # Required.
-  journal_to: archive@example.com
+      # RFC 5321 envelope sender address used in journal messages.
+      # Required.
+      journal_from: journal@example.com
 
-  tls:
-    # Enable TLS for the connection to the archive server.
-    # Default: true
-    enabled: true
+      # RFC 5321 envelope recipient address for the journal mailbox.
+      # Required.
+      journal_to: archive@example.com
 
-    # Skip TLS certificate verification (useful for self-signed certs).
-    # Default: false — do not disable in production.
-    skip_verify: false
+      tls:
+        # Enable TLS for the connection to the archive server.
+        # Set to false to use plain SMTP.
+        enabled: true
+
+        # Skip TLS certificate verification (useful for self-signed certs).
+        # Default: false — do not disable in production.
+        skip_verify: false
+
+    # Additional archive targets can be added here:
+    # - name: backup-archive
+    #   smtp_host: backup.example.com
+    #   smtp_port: 7700
+    #   journal_from: journal@example.com
+    #   journal_to: backup@example.com
+    #   tls:
+    #     enabled: true
+    #     skip_verify: false
+
+# forward: defines one or more plain SMTP forwarding destinations.
+# Each target receives a verbatim copy of the original message with the
+# target's from: address as MAIL FROM. Useful for forwarding to CRM or
+# ERP systems. Each target has its own independent queue and retry state.
+# Zero targets is valid.
+forward:
+  targets:
+    - # Unique name for this target. Used as the queue bucket identifier.
+      # Required. Must be unique across all archive and forward targets.
+      name: espocrm
+
+      # Hostname or IP address of the destination SMTP server.
+      # Required.
+      smtp_host: crm.example.com
+
+      # TCP port of the destination SMTP server.
+      # Default: 25
+      smtp_port: 25
+
+      # RFC 5321 MAIL FROM address used when forwarding to this target.
+      # Required.
+      from: relay@example.com
+
+      tls:
+        # Enable TLS for the connection to the forward server.
+        # Set to false to use plain SMTP.
+        enabled: true
+
+        # Skip TLS certificate verification (useful for self-signed certs).
+        # Default: false — do not disable in production.
+        skip_verify: false
+
+    # Additional forward targets can be added here:
+    # - name: erp
+    #   smtp_host: erp.example.com
+    #   smtp_port: 25
+    #   from: relay@example.com
+    #   tls:
+    #     enabled: true
+    #     skip_verify: false
 
 queue:
   # Directory where the persistent queue database is stored.
